@@ -1,0 +1,35 @@
+[project]
+name = "jaxformer"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "flax>=0.12.0",
+    "jax>=0.8.0",
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "N",   # pep8-naming
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "S",   # flake8-bandit
+    "UP",  # pyupgrade
+    "ANN", # flake8-annotations
+    "SIM", # flake8-simplify
+    "C90", # mccabe cyclomatic complexity
+]
+ignore = [
+    "ANN204", # __init__ return type
+    "S101",   # assert
+    "N803",   # lowercase parameter name
+    "N806",   # lowercase variable name
+    "E501",   # line length - already in ruff formatter
+    "S311",   # requiring cryptographicly secure rng
+    "UP046",  # generic issue
+]

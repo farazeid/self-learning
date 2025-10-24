@@ -1,3 +1,4 @@
+import einops
 import jax
 import jax.numpy as jnp
 from flax import nnx
@@ -80,39 +81,41 @@ class MLP(nnx.Module):
 class RoPE(nnx.Module):
     def __init__(
         self,
-        T: int,
-        model_dim: int,
+        T: int,  # max sequence length
+        d: int,  # layer dimension
+        base: float = 10000.0,
     ):
-        assert model_dim % 2 == 0, "Model dimension must be even for RoPE."
+        assert d % 2 == 0, "Model dimension must be even for RoPE."
 
-        freq = jnp.arange(1, T + 1, dtype=jnp.float32)[:, None]
+        freq = jnp.arange(1, T + 1, dtype=jnp.float32)[:, None]  # [[1], [2], ..., [T]] [T, 1]
 
-        position = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
-        position = position.repeat(2, axis=1).reshape(1, -1)
-        log_theta_base = jnp.log(10000.0)
-        theta = jnp.exp(-1 * position / model_dim * log_theta_base)
+        position = einops.repeat(
+            jnp.arange(d // 2, dtype=jnp.float32),
+            "x -> 1 (x 2)",  # [1, d]
+        )
+        theta = jnp.exp(-1 * position / d * jnp.log(base))  # theta = base^{-2i/d}
 
-        self.cos = jnp.cos(freq * theta)
-        self.sin = jnp.sin(freq * theta)
+        self.cos = jnp.cos(freq * theta)  # [T, d]
+        self.sin = jnp.sin(freq * theta)  # [T, d]
 
     def __call__(
         self,
         x: jax.Array,
-        seq_start: int,
+        seq_start_idx: int,
     ) -> jax.Array:
-        B, T, C = x.shape
+        b, t, d = x.shape
         dtype = x.dtype
         x = x.astype(jnp.float32)
 
-        cos_rope = x * self.cos[seq_start : seq_start + T, :]
+        cos_rope = x * self.cos[seq_start_idx : seq_start_idx + t, :]
 
-        x = x.reshape(B, T, C // 2, 2)
-        x1 = x[..., 0]
-        x2 = x[..., 1] * -1
-        x = jnp.stack([x2, x1], axis=-1)
-        x = x.reshape((B, T, C))
+        x_rotated = einops.rearrange(x, "b t (d_half 2) -> b t d_half 2", d_half=d // 2)
+        x1 = x_rotated[..., 0]
+        x2 = x_rotated[..., 1] * -1
+        x_rotated = jnp.stack([x2, x1], axis=-1)
+        x_rotated = einops.rearrange(x_rotated, "b t d_half complex -> b t (d_half complex)")
 
-        sin_rope = x * self.sin[seq_start : seq_start + T, :]
+        sin_rope = x_rotated * self.sin[seq_start_idx : seq_start_idx + t, :]
 
         x = cos_rope + sin_rope
         x = x.astype(dtype)

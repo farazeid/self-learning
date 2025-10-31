@@ -120,3 +120,97 @@ class RoPE(nnx.Module):
         x = cos_rope + sin_rope
         x = x.astype(dtype)
         return x
+
+
+class MultiLatentAttention(nnx.Module):
+    def __init__(
+        self,
+        num_heads: int,
+        T: int,
+        latent_dim: int,
+        dhR: int,
+        dtype: jnp.dtype,
+        dropout_rate: float,
+        rngs: nnx.Rngs,
+    ):
+        self.dhR = dhR
+        self.num_heads = num_heads
+
+        self.linearA = Linear(..., 2 * latent_dim, dtype, rngs=rngs)
+        self.linearB = Linear(..., self.dhR, dtype, rngs=rngs)
+        self.linearC = Linear(..., self.dhR * num_heads, dtype, rngs=rngs)
+        self.ropeK = RoPE(T, self.dhR)
+        self.ropeQ = RoPE(T, self.dhR * self.num_heads)
+        self.linearZ = Linear(..., ..., dtype, rngs=rngs)
+        self.dropout = nnx.Dropout(rate=dropout_rate, rngs=rngs)
+
+    def __call__(
+        self,
+        x: jax.Array,
+        *,
+        kv_cache: jax.Array | None = None,
+        kr_cache: jax.Array | None = None,
+    ) -> tuple[jax.Array, tuple[jax.Array | None, jax.Array | None]]:
+        b, t, c = x.shape
+        dtype = x.dtype
+        use_rope = self.dhR > 0
+
+        x = self.linearA(x)
+        kv, q = jnp.split(x, 2, axis=-1)
+
+        if use_rope:
+            t_start = kv_cache.shape[1] if kv_cache is not None else 0
+            x_k_r = self.linearB(x)
+            x_q_r = self.linearC(x)
+            kRt = self.ropeK(x_k_r, t_start)
+            qRt = self.ropeQ(x_q_r, t_start)
+            qRt = einops.rearrange(
+                qRt,
+                "B T (nh d) -> B nh T d",
+                nh=self.num_heads,
+            )
+
+        q, k, v = ...
+        mask = ...
+
+        # x = self.scaled_dot_product_attention(q, k, v, mask)
+        x = nnx.dot_product_attention(q, k, v, mask=mask)
+        x = jax.lax.all_to_all(
+            x,
+            axis_name="tp",
+            split_axis=3,
+            concat_axis=1,
+            tiled=True,
+        )
+        x = self.linearZ(x)
+        x = self.dropout(x)
+
+        return x, (kv_cache, kr_cache)
+
+    def scaled_dot_product_attention(
+        self,
+        q: jax.Array,
+        k: jax.Array,
+        v: jax.Array,
+        mask: jax.Array,
+    ) -> jax.Array:
+        in_dtype = q.dtype
+
+        q, k, v = jax.tree.map(
+            lambda x: x.astype(jnp.float32),
+            (q, k, v),
+        )
+        dk = q.shape[-1]
+
+        in_x = einops.einsum(q, k, "b n T d, B n t d -> B n T t")
+        in_x *= dk**-0.5
+        in_x = jnp.where(
+            mask == 0,
+            -jnp.inf,
+            in_x,
+        )
+        in_x = nnx.softmax(in_x, axis=-1)
+        in_x = einops.einsum(in_x, v, "B n T t, B n t d -> b n T d")
+
+        in_x = in_x.astype(in_dtype)
+        return in_x
